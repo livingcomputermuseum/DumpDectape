@@ -6,8 +6,8 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{88B646C3-54D8-4D63-BB8A-B391C996FE47}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <RootNamespace>DumpPDP7</RootNamespace>
-    <AssemblyName>DumpPDP7</AssemblyName>
+    <RootNamespace>DumpDT18</RootNamespace>
+    <AssemblyName>DumpDT18</AssemblyName>
     <TargetFrameworkVersion>v4.5.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -47,6 +47,18 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <None Include="dumpdt18-550.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="dumpdt18-550.pal" />
+    <None Include="dumpdt18.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="dumpdt18.pal" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="dumpdt18-550.lst" />
+    <Content Include="dumpdt18.lst" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

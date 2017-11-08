@@ -1,0 +1,768 @@
+/ TD8E 18-bit DECtape DUMP Program.  Based on DUMPREST code from D. Gesswein
+/ (see ftp://ftp.pdp8online.com/software/dumprest).
+/ Modified for 18-bit PDP-7 550 DECtape imaging by J. Dersch
+/
+/ This program will send a DECtape image out the console port.
+/ The format of the data sent is 0xff (0377) or 0xfd if read error
+/ followed by 384 12-bit words (256 18-bit words) of data for each block.
+/ After the last block a 0xfe (0376) is sent
+/ with a two byte checksum, low 8 bits first then upper 4.
+/ The words in a block are sent as three bytes for each 2 words.
+/   1 = low 8 bits first word
+/   2 = upper 4 bits first and lower 4 bits second
+/   3 = upper 8 bits second word
+/
+/ The program (PC) receiving the data should be started before this program.
+/
+/ To run, start at 0200.
+/    SR 11 should be drive, only 0 and 1 supported without reassembling
+/    SR 6-8 should be maximum memory field in computer, needs 8k minimum
+/
+/ The receiving program should be running first.
+/ At normal exit hitting cont will restart the program.
+/
+/ Should halt at label finish (140) with number of recoverable errors in AC
+/ The current block being read will be displayed in the AC
+/ while running.
+/
+/ The PC program will print out the bad location if an error occurs.
+/
+/ We will retry each read up to four times on error.
+/
+/ This transfers the standard 256 word by 578 blocks used by 18-bit DEC hardware,
+/ using PDP-7 550 controller checksums (1's complement 18-bit additive).
+/ It will read as many blocks are present up to the forward end-zone, so it will
+/ handle tapes that vary from the standard 1102(8) block length.
+/ NOTE: As the PDP-7 checksum takes significantly longer to calculate than the later
+/ XOR-based checksums, there is a chance that timeout errors may occur on certain
+/ combinations of drives, tapes, and controllers.
+/
+
+        INAD=030                / Address of serial input, 30 for console
+        KCF2=6000 INAD
+        KSF2=6001 INAD
+        KCC2=6002 INAD
+        KRS2=6004 INAD
+        KIE2=6005 INAD
+        KRB2=6006 INAD
+
+        OUTAD=040               / Address of serial output, 40 for console
+        TFL2=6000 OUTAD
+        TSF2=6001 OUTAD
+        TCF2=6002 OUTAD
+        TPC2=6004 OUTAD
+        TSK2=6005 OUTAD
+        TLS2=6006 OUTAD
+
+        /CODE BASED ON:
+/2 TD8E INITIALIZER PROGRAM, V7A
+/
+/COPYRIGHT (C) 1975, 1977
+/DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+/
+/
+/
+/THIS SOFTWARE IS FURNISHED UNDER A LICENSE FOR USE ONLY ON A
+/SINGLE COMPUTER SYSTEM AND MAY BE COPIED ONLY WITH THE INCLU-
+/SION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE, OR ANT OTHER
+/COPIES THEREOF, MAY NOT BR PROVIDED OR OTHERWISE MADE AVAILABLE
+/TO ANY OTHER PERSON EXCEPT FOR USE ON SUCH SYSTEM AND TO ONE WHO
+/AGREES TO THESE LICENSE TERMS.  TITLE TO AND OWNERSHIP OF THE
+/SOFTWARE SHALL AT ALL TIMES REMAIN IN DEC.
+/
+/
+/THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE WITHOUT
+/NOTICE AND SHOULD NOT BE CONSTRUED AS A COMMITMENT BY DIGITAL
+/EQUIPMRNT COROPATION.
+/
+/DEC ASSUMES NO RESPONSIBILITY FOR THE USE OR RELIABILITY OF ITS
+/SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DEC.
+/
+/
+/
+/
+/
+/
+
+/DECEMBER 21, 1973              GB/RL/EF/SR
+
+/ABSTRACT--
+/       THE ROUTINE DESCRIBED AND LISTED HERE IS A GENERAL
+/DATA HANDLER FOR THE TD8E DECTAPE SYSTEM. THE ROUTINE
+/CONTAINS SEARCH, READ, AND WRITE FUNCTIONS IN A FORMAT
+/WHICH IS COMPATIBLE WITH OS/8 DEVICE HANDLER CALLING
+/SEQUENCES.
+
+/FIXES SINCE FIELD-TEST RELEASE:
+
+/1.     FIXED BUG RE CLA ON RETRY AFTER ERROR
+/2.     ALLOWED FINAL BOOTSTRAP TO BE INTO A WRITE-LOCKED DEVICE
+
+/OS/8 V3D CHANGES:
+
+/3.     FIXED BUG RE TD8E BUILD (V6B PATCH)
+
+/THIS ROUTINE CAN BE RE-EDITED AND ASSEMBLED TO PRODUCE
+/VARIATIONS ON THE BASIC TD8E SYSTEM. ASSEMBLY PARAMETERS
+/CONTROL:
+/A) WHAT DRIVES (UNITS 0-7) WILL BE USED
+/B) THE ORIGIN OF THE TWO PAGE ROUTINE
+/C) WHAT MEMORY FIELD THE ROUTINE WILL RUN IN
+/D) THE SIZE OF THE DECTAPE BLOCK TO BE READ/WRITTEN
+
+/ FOLLOWING ARE THE PARAMETERS SET UP FOR THE DEC 550 DECTAPE CONTROLLER:
+
+        DRIVE=10        /UNITS 0 AND 1 SELECTED
+        ORIGIN=600      /ENTER AT ORIGIN, ORIGIN+4
+        AFIELD=0        /INITIAL FIELD SETTING
+        MFIELD=00       /AFIELD*10=MFIELD
+        WDSBLK=600      /384 12-BIT WORDS PER BLOCK (256 18-BIT DATA WORDS)
+
+/THE USE OF THE PARAMETERS IS AS FOLLOWS:
+
+/ DRIVE: DRIVE DETERMINES WHICH UNITS WILL BE SELECTED
+/       DRIVE=10 IMPLIES UNITS 0 &1
+/       DRIVE=20 IMPLIES UNITS 2&3
+/       DRIVE=30 IMPLIES UNITS 4&5
+/       DRIVE=40 IMPLIES UNITS 6&7
+
+/ORIGIN: ALTERING ORIGIN CAUSES ASSEMBLY IN A DIFFERENT
+/       MEMORY LOCATION. WHEN CHANGING ORIGIN KEEP IN MIND
+/THAT THIS IS A TWO PAGE ROUTINE.
+
+/AFIELD: AFIELD DETERMINES THE INITIAL FIELD SETTING FOR THE
+/       LOADER. PERMISSIBLE VALUES FOR AFIELD ARE 0 TO 7.
+
+/MFIELD: MFIELD IS USED IN A CIF CDF MFIELD INSTRUCTION.
+/       THE VALUE INSERTED FOR MFIELD SHOULD BE 10(8) TIMES
+/       THE VALUE FOR AFIELD. THE PERMISSIBLE VALUES ARE 00-70.
+
+/WDSBLK: WDSBLK GOVERNS HOW MANY WORDS THE ROUTINE THINKS ARE
+/       IN A DECTAPE BLOCK. THE STANDARD VALUE IS 201(8) OR
+/       128 DECIMAL. THE VALUE USED
+/       FOR WDSBLK SHOULD BE THE NUMBER OF WORDS THE TAPE WAS
+/       FORMATTED TO CONTAIN.
+
+/IF WE WANT A HANDLER FOR UNITS 2&3 TO RESIDE IN
+/FIELD 2 AT LOCATION 3000 AND READ/WRITE 256(10) WORDS
+/PER BLOCK, THE PARAMETERS WOULD BE:
+/       DRIVE=20
+/       ORIGIN=3000
+/       AFIELD=2
+/       MFIELD=20
+/       WDSBLK=400
+/THE CALL TO THE SUBROUTINE FOLLOWS BASICALLY THE
+/CALLING SEQUENCE FOR OS/8 DEVICE HANDLERS.
+/THE CALLING SEQUENCE IS:
+
+/       CDF CURRENT
+/       CIF MFIELD      /MFIELD=FIELD ASSEMBLED IN
+/       JMS ENTRY       /ENTRY=ORIGIN (EVEN NUMBERED DRIVE
+                        /AND ORIGIN+4 FOR ODD NUMBERED DRIVE.
+/       ARG1
+/       ARG1B (DJG)
+/       ARG2
+/       ARG3
+/       ERROR RETURN
+/       NORMAL RETURN
+
+/THE ARGUMENTS ARE:
+
+/ARG1: FUNCTION WORD    BIT0: 0=READ, 1=WRITE
+/                       BITS 1-5: UNUSED, WAS # BLOCKS IN OPERATION (DJG)
+/                       BITS 6-8: FIELD OF BUFFER AREA
+/                       BIT 9: UNUSED
+/                       BIT 10: UNUSED
+/                       BIT 11: 1=START FORWARD, 0=REVERSE
+/ARG1A: # OF BLOCKS IN OPERATIONA (DJG)
+/ARG2: BUFFER ADDRESS FOR OPERATION
+/ARG3: STARTING BLOCK FOR OPERATION
+
+/ERRORS: THE HANDLER DETECTS TWO TYPES OF ERRORS:
+/A) FATAL ERRORS- PARITY ERROR, TIMING ERROR,
+/               TOO GREAT A BLOCK NUMBER
+/       FATAL ERRORS TAKE ERROR RETURN WITH THE
+/       AC=4000.
+/B) NON-FATAL- SELECT ERROR.
+/       IF NO PROPER UNIT IS SELECTED, THE ERROR
+/       RETURN IS TAKEN WITH CLEAR AC.
+/FATAL ERRORS TRY THREE TIMES BEFORE TAKING ERROR RETURN.
+/THE NORMAL RETURN IS TAKEN AFTER ALL INDICATED
+/BLOCKS HAVE BEEN TRANSFERRED. THE AC IS CLEAR.
+
+/THE TD8E IOT'S ARE:
+        SDSS=7001-DRIVE /SKIP ON SINGLE LINE FLAG
+        SDST=7002-DRIVE /SKIP ON TIMING ERROR
+        SDSQ=7003-DRIVE /SKIP ON QUAD LINE FLAG
+        SDLC=7004-DRIVE /LOAD COMMAND REGISTER
+        SDLD=7005-DRIVE /LOAD DATA REGISTER
+        SDRC=7006-DRIVE /READ COMMAND REGISTER
+        SDRD=7007-DRIVE /READ DATA REGISTER
+
+/THE IOT'S IN GENERAL ARE 677X,676X,675X,AND 674X.
+/THE OTHERS CONTROL UNITS 2-7.
+
+/       THIS HANDLER USES DECTAPE BLOCKS NOT OS/8 BLOCKS !
+
+        *ORIGIN
+
+/       MODIFIED SO BIT 0 ON ENTRY IS UNIT 1
+DTA0,   0
+        DCA UNIT        /SAVE UNIT POSITION
+        RDF
+        TAD C6203       /GET DATA FIELD AND SETUP RETURN
+        DCA LEAVE
+        TAD I DTA0      /GET FUNCTION WORD
+        SDLD            /PUT FUNCTION INTO DATA REGISTER
+        CLA
+        TAD MWORDS
+        DCA WCOUNT      /STORE MASTER WORD COUNT
+        ISZ DTA0        /TO BLOCK COUNT (DJG)
+        TAD I DTA0      / (DJG)
+        CIA             / (DJG)
+        DCA PGCT        / (DJG)
+        ISZ DTA0        /TO BUFFER
+        TAD I DTA0
+        DCA XBUFF       /SAVE ADDRESS (DJG)
+        ISZ DTA0        /TO BLOCK NUMBER
+        TAD I DTA0
+        DCA BLOCK
+        ISZ DTA0        /POINT TO ERROR EXIT
+        CIF CDF MFIELD  /TO ROUTINES DATA FIELD
+        SDRD
+        AND C70         /GET FIELD FOR XFER
+        TAD C6201       /FORM CDF N
+        DCA XFIELD      /IF=0 AND DF=N AT XFER.
+        TAD UNIT        /TEST FOR SELECT ERROR
+        SDLC
+        CLA             / Moved here because my drive 1 is slow selecting
+        TAD RETRY
+        DCA TRYCNT      /3 ERROR TRIES
+        SDRC
+        AND C100
+        SZA CLA
+        JMP FATAL-1
+        SDRD            /PUT FUNCT INTO XFUNCT IN SECOND PG.
+        DCA I CXFUN
+        TAD WCOUNT
+        DCA I CXWCT
+        SDRD            /GET MOTION BIT TO LINK
+        CLL RAR
+XFIELD, HLT             /INTO NEXT PAGE
+        JMP GO          /AND START THE MOTION.
+RWCOM,  SDST            /ANY TD8E TIME ERRORS?
+        /JMP TIMEOK     /UNCOMMENT IF YOU SUSPECT TIMING ISSUES.
+        /HLT
+TIMEOK, SZA CLA         /OR CHECKSUM ERRORS?
+        JMP TRY3        /PLEASE NOTE THAT THE LINK IS ALWAYS
+                        /SET AT RWCOM. GETCHK SETS IT.
+        ISZ PGCT        / (DJG)
+        SKP             / (DJG)
+        JMP EXIT        /ALL DONE. GET OUT
+        ISZ BLOCK       /NEXT BLOCK TO XFER
+        CLL CML         /FORCES MOTION FORWARD
+GO,     CLA CML RTR     /LINK BECOMES MOTION BIT
+        TAD C1000
+        TAD UNIT        /PUT IN 'GO' AND UNIT #
+        SDLC            /LOOK FOR BLOCK NO.
+        CLA
+        TAD XBUFF
+        DCA OLDBUF
+        RDF
+        TAD C6201
+        DCA OLDFLD
+        JMS I CRDQUD    /WAIT AT LEAST 6 LINES TO LOOK
+        JMS I CRDQUD
+CM200,  7600            /COULD HAVE SAVED A LOC. HERE
+SRCH,   SDSS
+        JMP .-1         /WAIT FOR SINGLE LINE FLAG
+        SDRC
+        CLL RTL         /DIRECTION TO LINK. INFO BITS
+                        /ARE SHIFTED.
+        AND C374        /ISOLATE MARK TRACK BITS
+        TAD M110        /IS IT END ZONE?
+        SNA             /THE LINK STAYS SAME THRU THIS
+        JMP ENDZ
+        TAD M20         /CHECK FOR BLOCK MARK
+        SZA CLA
+        JMP SRCH
+        SDRD            /GET THE BLOCK NUMBER
+        SZL             /IF WE ARE IN REVERSE, LOOK FOR 3
+                        /BLOCKS BEFORE TARGET BLOCK. THIS
+                        /ALLOWS TURNAROUND AND UP TO SPEED.
+        TAD C3          /REVERSE
+        CMA
+        TAD BLOCK
+        CMA             /IS IT RIGHT BLOCK?
+        SNA
+        JMP FOUND       /YES..HOORAY!
+M110,   SZL SNA CLA     /NO, BUT ARE WE HEADED FOR IT?
+                        /ABOVE SNA IS SUPERFLUOUS.
+        JMP SRCH        /YES
+        SDRC            /NO, TURN US AROUND.
+        CLL RTL         /DIRECTION TO LINK
+        CLA             /THIS CODE USED TO BE SHARED WITH ENDZ,
+        JMP GO          /BUT NOW ENDZ HANDLES END OF TAPE CASES ONLY.
+ENDZ,   SDRC            /WE ARE IN THE END ZONE
+        CLL RTL         /DIRECTION TO LINK
+        SZL CLA         /ARE WE IN REVERSE?
+        JMP GO          /YES..TURN US AROUND
+        TAD BLOCK       /IF WE ARE ON BLOCK ZERO, IT IS POSSIBLE FOR US TO BE AT THE
+                        /REVERSE ENDZONE GOING FORWARD, EITHER DUE TO A RETRY OR BECAUSE
+                        /THE TAPE WAS STARTED IN A POSITION BEFORE THE END ZONE.
+                        /THESE CASES SHOULD NOT BE TREATED AS END-OF-TAPE.
+        SZA CLA
+        JMP ENDEX       /END OF TAPE.  STOP THE UNIT AND TAKE THE END EXIT.
+        JMP GO
+
+TRY3,   CLA
+OLDFLD, NOP
+        TAD OLDBUF
+        DCA XBUFF
+        ISZ TRYCNT
+        JMP GO          /TRY 3 TIMES
+        JMP FATAL       /LINK OFF MEANS AC=4000 ON RETURN
+EXIT,   ISZ DTA0        /TAKE THE NORMAL RETURN
+        CLL CML         /AC=0 ON NORMAL RETURN
+FATAL,  ISZ DTA0        /TAKE THE ERROR RETURN
+ENDEX,  TAD UNIT
+        SDLC            /STOP THE UNIT
+        CLA CML RAR
+LEAVE,  HLT
+        JMP I DTA0
+
+
+C6203,  6203
+C6201,  6201
+CRDQUD, RDQUAD
+CXFUN,  XFUNCT
+C100,   100
+C1000,  1000
+
+        / NOTE THAT THE ABOVE CODE SEGMENT COMES VERY CLOSE TO TOUCHING
+        / THIS ONE, AND THE BELOW MUST RESIDE AT THE END OF THIS PAGE.
+        / BE CAREFUL ADDING NEW CODE TO THE ABOVE CODE.
+        *ORIGIN+172
+FOUND,  SZL CLA         /RIGHT BLOCK. HOW ABOUT DIRECTION?
+        JMP GO          /WRONG..TURN AROUND
+        TAD UNIT        /PUT UNIT INTO LINK
+        CLL RAL         /AC IS NOW 0
+C70,    70              /********DON'T MOVE THIS!!!!******
+C3,     3
+                        /INTO NEXT PAGE
+       *ORIGIN+200
+        CIF MFIELD
+        RAR             /NOW GET UNIT #
+        DCA XUNIT
+        SDRC
+        SDLC
+REVGRD, SDSS
+        JMP .-1         /LOOK FOR REVERSE GUARD
+        SDRC
+        AND K77
+        TAD CM32        /IS IT REVERSE GUARD?
+        SZA CLA
+        JMP REVGRD      /NO.KEEP LOOKING
+        TAD XWCT
+        DCA WORDS       /WORD COUNTER
+        TAD XFUNCT      /GET FUNCTION  READ OR WRITE
+K7700,  SMA CLA
+        JMP READ        /NEG. IS WRITE
+WRITE,  HLT             /WRITE CODE REMOVED.
+K77,    77              /ABOVE MAY SKIP (NOT ANYMORE DJG)
+READ,   JMS RDQUAD
+        JMS RDQUAD
+        JMS RDQUAD      /SKIP CONTROL WORDS
+RDLP,   JMS RDQUAD
+        JMS P7CHK       /COMPUTE PDP-7 550 CHECKSUM AS WE GO        
+        DCA I XBUFF
+        ISZ XBUFF       /AT END OF FIELD?
+        JMP STFLD2+1    /NOT AT END OF FIELD (DJG)
+        RDF
+        TAD (6211
+        DCA STFLD2
+STFLD2, NOP
+        ISZ WORDS       /DONE THIS OP?
+        JMP RDLP        /NO SUCH LUCK        
+        JMS RDQUAD      /DONE: READ AND CHECKSUM LAST 18-BIT WORD (1.5 12-BIT WORDS)
+        JMS P7CHK       /CHECKSUM IT
+        JMS RDQUAD      /READ LAST PART OF CKSUM WORD
+        JMS P7CHK       /CHECKSUM IT
+        JMS VFYCHK      /VERIFY CHECKSUM
+        JMP I CRWCOM
+C300,   300             /PROTECTION (NOT ANYMORE DJG)
+
+RDQUAD, 0               /READ A 12 BIT WORD
+        SDSQ
+        JMP .-1
+        SDRD            /READ DATA
+        JMP I RDQUAD
+
+XUNIT, 0
+        / VERIFIES 18-BIT 1'S COMPLEMENT CKSUM.
+        / SHOULD BE 0 OR -0.
+        / AC SHOULD BE 0 ON EXIT IF CKSUM IS OK, NONZERO
+        / OTHERWISE.
+        / CODE EXPECTS LINK TO BE SET ON EXIT REGARDLESS.
+        / THIS ROUTINE ALSO RESETS VARIOUS CHECKSUM ROUTINE
+        / STATE BACK TO INITIAL CONDITIONS IN PREPARATION
+        / FOR THE NEXT BLOCK.
+VFYCHK, 0
+        CLA	CLL
+        TAD CK18L       /CHECK FOR ZERO
+        SZA CLA
+        JMP VFYNEG      /NOPE, TRY NEGATIVE ZERO
+        TAD CK18H       
+        JMP VDONE       /VALIDITY IS DEPENDENT ON THE VALUE OF CK18H
+VFYNEG,	CLA IAC         /CHECK FOR NEGATIVE ZERO (777777)
+        TAD CK18L       /LOW 12 BITS SHOULD BE ZERO AFTER INCREMENT
+        SZA
+        JMP VDONE       /INVALID CKSUM
+        TAD CK18H
+        TAD (0100       /HIGH 6 BITS SHOULD BE ZERO AFTER INCREMENT
+VDONE,	DCA EQUTMP      /SAVE RESULT
+        DCA CK18L       /CLEAR 18-BIT CKSUM FOR NEXT GO-ROUND
+        DCA CK18H
+        TAD P7TBLL
+        DCA P7WD        /RESET CHECKSUM WORD ROUTINE POINTER
+        CLL CML         /FORCES LINK ON AT RWCOM
+        TAD EQUTMP      /RELOAD RESULT
+        JMP I VFYCHK
+
+CFATAL, FATAL
+CRWCOM, RWCOM
+XFUNCT, 0
+CM32,   -32
+C1400,  1400
+WORDS,  0
+XWCT,   0
+P7TBLL, P7TBL
+                        
+        PAGE
+                        /PDP-7 550 CHECKSUM ROUTINE:
+                        /COMPUTE 18-BIT 1'S COMPLEMENT CHECKSUM
+                        /AC CONTAINS LAST 12-BIT WORD READ FROM TAPE, STOW THESE BITS
+                        /IN THE RIGHT PLACE IN THE 18-BIT WORD AND ADD TO RUNNING SUM
+                        /AC MUST BE RESTORED BEFORE RETURNING
+                        /THIS CURRENTLY EXECUTES IN ABOUT 65US WORST-CASE.
+P7CHK,  0
+        DCA EQUTMP      /SAVE ORIGINAL AC
+        
+        TAD EQUTMP
+        JMP I P7WD      /DISPATCH TO WORD ROUTINE, AUTOINCREMENT P7WD
+        
+P7WD0,                  /TAPE WORD 0: 18-BIT WORD 0, HIGH 12 BITS.
+        AND (7700       /STORE HIGH 6 BITS IN 18 BIT HIGH
+        DCA WD18H
+        TAD EQUTMP
+        BSW
+        AND (7700       /STORE LOW 6 BITS IN UPPER 6 BITS OF 18 BIT LOW WORD
+        DCA WD18L
+        JMP P7DONE      /DONE, NO 18-BIT WORD READY YET
+        
+P7WD1,                  /TAPE WORD 1: 18-BIT WORD 0, LOW 6-BITS; 18-BIT WORD 1, HIGH 6-BITS
+        AND (7700       /TAKE HIGH 6 BITS
+        BSW
+        TAD WD18L       /FINISH 18-BIT WORD 0 (LOW 6-BITS)
+        DCA WD18L
+        TAD EQUTMP      /SAVE BITS FOR NEXT WORD (HIGH 6 BITS OF 18-BIT WORD 1)		
+        DCA WD18T
+        JMP P7CK        /DO CHECKSUM, 18-BIT WORD 0 DONE.
+        
+P7WD2,                  /TAPE WORD 2: 18-BIT WORD 1, LOW 12-BITS
+        DCA WD18L       /THAT WAS EASY.
+        TAD WD18T       /COPY HIGH 6 BITS FROM LAST TAPE WORD
+        AND (0077
+        BSW
+        DCA WD18H
+        TAD P7TBL
+        DCA P7WD        / RESET WORD ROUTINE POINTER AND CONTINUE, 18-BIT WORD 1 DONE.
+        
+                        /DO AN 18-BIT 1'S COMPLEMENT ADDITION TO THE RUNNING CHECKSUM
+P7CK,   CLL CLA         /CLEAR LINK, NEEDED FOR CARRY DETECTION
+        TAD WD18L       /ADD TO LOW 12 BITS
+        TAD	CK18L
+        DCA CK18L
+        SNL             /CARRY FROM LOW 12 BITS?
+        JMP P7HI        /NO, CONTINUE
+        CLL	CLA         /YES, INCREMENT HIGH 6 BITS
+        TAD (0100
+P7HI,   TAD CK18H       /ADD CKSUM TO HIGH 6 BITS	
+        TAD WD18H       /(NOTE THAT THE ABOVE TWO ADDS CAN RESULT IN AT MOST ONE CARRY OUT)
+        DCA CK18H
+        SNL             /CARRY?
+        JMP P7DONE      /NO, DONE HERE.
+        ISZ CK18L       /END-AROUND CARRY TO LOW WORD
+        JMP P7DONE      /RESULT NON-ZERO, DONE
+        TAD CK18H       /RESULT ZERO: CARRY FROM LOW 12-BIT WORD TO HIGH SIX BITS
+        TAD (0100       /THIS CAN'T OVERFLOW SINCE WE JUST DID A CARRY OUT FROM IT
+        DCA CK18H
+P7DONE, TAD EQUTMP      /RESTORE AC
+        JMP I P7CHK     /DONE
+
+P7TBL,  P7TBL           / JUMP TABLE FOR 18-BIT CHECKSUM ROUTINE
+        JMP P7WD0
+        JMP P7WD1
+        JMP P7WD2
+
+        *10
+P7WD,   P7TBL
+        
+
+        *20
+RETRY,  7774            / RETRY UP TO 4 TIME
+NUMBLK, 3777            / MAX NUMBER OF BLOCKS TO ATTEMPT READING.  BY DEFAULT THIS PROGRAM WILL READ UNTIL
+                        / IT HITS THE END OF THE TAPE (FORWARD ENDZONE).  IF YOU NEED TO LIMIT THE NUMBER OF BLOCKS
+                        / READ, MODIFY THIS VALUE.
+
+MWORDS, -WDSBLK         / WORDS PER BLOCK
+WCOUNT, 0
+BLKFLD, 12              / 10 386 WORD BLOCKS OF 12-BIT WORDS, EQUIVALENT TO 256 18-BIT WORDS.
+                        / WRAPPING PAST END OF LAST FIELD DOESN'T WORK
+FIELDS, 0
+RDSIZE, 0               / NUMBER BLOCKS PER READ
+CBLOCK, 0               / CURRENT BLOCK TO XFER
+DRVSEL, 0
+READST, 377
+LOC,    0
+LEN,    0
+BCNT,   0               / BLOCKS TO SEND TO PC
+TEMP,   0
+C17,    17
+C360,   360
+CHKSM,  0
+ERRCN2, 0
+OLDBUF, 0               / BELOW ARE USED BY DTA0 ROUTINE
+XBUFF,  0
+C374,   374
+BLOCK,  0
+UNIT,   0
+TRYCNT, -3
+PGCT,   0
+CXWCT,  XWCT
+M20,    -20
+
+
+WD18L,  0               / Low 12 bits of current 18-bit word
+WD18H,  0               / High 6 bits of current 18-bit word - 
+                        / upper 6 bits are used to make carry-out testing faster, low bits must be zero.
+                        / (routine actually testing cksum at end of block will need to take this into account.)
+WD18T,  0               / Temporary storage while building 18-bit words
+CK18L,  0               / Low 12 bits of running 18-bit PDP-7 checksum
+CK18H,  0               / High 6 bits -- see WD18H for special info.
+EQUTMP, 0
+
+    *140
+FINISH, HLT             / Normal good halt
+        JMP START
+
+        *200
+START,  CDF 0
+        CAF
+        CLA CLL OSR     / Get drive
+        AND (1
+        RTR
+        DCA DRVSEL
+        CLA CLL OSR     / Get max field
+        RTR
+        RAR
+        AND (7
+        SNA
+        HLT             / Must have at least 1 field for buffer
+        CIA
+        DCA FIELDS
+        DCA ERRCN2
+RDSZLP, TAD BLKFLD      / Multiply by number of fields available
+        ISZ FIELDS
+        JMP RDSZLP
+        DCA RDSIZE      / NUMBER BLOCK PER READ
+        DCA CBLOCK
+        DCA CHKSM
+        DCA CK18L       /RESET 18B CHECKSUM DATA
+        DCA CK18H
+        TAD P7TBL
+        DCA P7WD
+
+DUMPLP, CLA
+        TAD RDSIZE
+        TAD CBLOCK
+        CIA
+        TAD NUMBLK      / MORE BLOCKS LEFT THAN READSIZE?
+        SMA             / NO, READ NUMBER LEFT
+        CLA             / YES, ONLY READ RDSIZE
+        TAD RDSIZE
+        SNA             / ANY MORE BLOCKS?
+        JMP DONE        / NO, DO FINISH STUFF
+        DCA ARGSZ
+        TAD CBLOCK
+        DCA ARGBK
+        TAD DRVSEL
+        JMS DTA0
+        0010              / READ STARTING IN FIELD 1
+ARGSZ,  0
+        0
+ARGBK,  0
+        JMP ENDRET      / TAKEN WHEN END OF TAPE IS HIT
+        JMP ERRRET      / TAKEN WHEN AN ERROR IS ENCOUNTERED
+        TAD (377        / All blocks good
+        DCA READST
+                        / Send data, each block starts with FF
+        CLA CLL         / then 2 12 bit words in 3 bytes
+        DCA LOC         / ERRRET DUPLICATES SOME OF THIS
+        TAD ARGSZ
+        CIA
+        DCA BCNT        / Setup loop counter with number blocks read
+        CDF 10
+OUTBL1, JMS OUTBLK      / Send a block
+        ISZ CBLOCK
+        ISZ BCNT        / Send all read?
+        JMP OUTBL1      / No
+        CDF 0
+        JMP DUMPLP      / Go read next batch
+
+
+DONE,   CLA             / Send FE and -checksum of all words
+        TAD (376
+        JMS PUN
+        CLA CLL
+        TAD CHKSM       / Send checksum in two bytes, low bits first
+        CIA
+        JMS PUN
+        CLA CLL
+        TAD CHKSM
+        CIA
+        RTR
+        RTR
+        RTR
+        RTR
+        AND C17
+        JMS PUN
+        CLA
+        TAD DRVSEL
+        JMS DTA0        / REWIND TAPE
+        0010
+        1
+        0
+        0
+        NOP
+        NOP
+        TAD ERRCN2      / Leave AC with # of errors
+        JMP FINISH
+
+                        /SEND GOOD BLOCKS READ WITH GOOD BLOCK FLAG
+                        /THEN BAD WITH BAD BLOCK FLAG.
+ERRRET,
+/       HLT             / ****** If we want to stop on error
+        CDF 10
+        CLA CLL
+        DCA LOC
+        TAD CBLOCK
+        CIA
+        TAD BLOCK       /Get - number good blocks read
+        CIA             /Last was bad
+        SNA
+        JMP FSTBAD      /First block is bad, no good to send
+        DCA BCNT
+        TAD (377
+        DCA READST
+OUTBL2, JMS OUTBLK      /Send good blocks
+        ISZ CBLOCK
+        ISZ BCNT
+        JMP OUTBL2
+FSTBAD,	TAD (375        /NOW SEND BAD BLOCK
+        DCA READST
+        JMS OUTBLK
+        ISZ CBLOCK
+        ISZ ERRCN2
+        CDF 0
+        JMP DUMPLP      /And read from here on
+
+        PAGE
+ENDRET,                 /SEND LAST SET OF BLOCKS READ BEFORE END OF TAPE AND FINISH.
+        CDF 10
+        CLA CLL
+        DCA LOC
+        TAD CBLOCK
+        CIA
+        TAD BLOCK       / GET NUMBER OF BLOCKS READ IN LAST BATCH
+        CMA             / +1 to -BCNT SO WE SEND ALL BLOCKS
+        SNA
+        JMP DONE        / READ ZERO BLOCKS IN LAST BATCH, WE ARE DONE
+        DCA BCNT
+        TAD (377
+        DCA READST
+OUTBL3, JMS OUTBLK      / SEND ALL BLOCKS
+        ISZ CBLOCK
+        ISZ BCNT
+        JMP OUTBL3
+        CDF 0
+        JMP DONE        / NO MORE BLOCKS, DONE.
+
+OUTBLK, 0               /Send a block of data out serial port
+        CLA
+        TAD WCOUNT
+        DCA LEN
+        TAD READST      /Send good/bad flag
+        JMS PUN
+OUT,    CLA CLL
+        TAD I LOC
+        TAD CHKSM       / Keep checksum of all words sent
+        DCA CHKSM
+        TAD I LOC       / Send 2 words as 3 bytes
+        JMS PUN
+        CLA CLL
+        TAD I LOC
+        RTR             / Shift top 4 bits to low 4
+        RTR
+        RTR
+        RTR
+        AND C17
+        DCA TEMP
+        ISZ LOC
+        JMP STFLD3+1    /NOT AT END OF FIELD (DJG)
+        RDF             /At end, inc to next field
+        TAD (6211       /BUILD CDF
+        DCA STFLD3
+STFLD3, NOP
+        ISZ LEN         /END OF BUFFER?
+        SKP             /NO
+        JMP ENDBK       /YES
+        TAD I LOC
+        TAD CHKSM
+        DCA CHKSM
+        TAD I LOC
+        RTL
+        RTL
+        AND C360
+        TAD TEMP
+        JMS PUN
+        CLA CLL
+        TAD I LOC
+        RTR
+        RTR
+        JMS PUN
+        ISZ LOC
+        JMP STFLD4+1    /NOT AT END OF FIELD (DJG)
+        RDF
+        TAD (6211       /BUILD CDF
+        DCA STFLD4
+STFLD4, NOP
+        ISZ LEN
+        JMP OUT
+        JMP I OUTBLK
+ENDBK,  TAD TEMP    /SEND LAST PART OF WORD
+        JMS PUN
+        JMP I OUTBLK
+
+PUN,    0               / Send byte out serial port
+/       PLS             / Punch for testing with emulator
+        TLS2            / Send out console
+        CLA CLL
+        TAD CBLOCK
+/       PSF
+        TSF2            /Wait until character sent
+        JMP .-1
+        CLA
+        JMP I PUN
+
+        $
