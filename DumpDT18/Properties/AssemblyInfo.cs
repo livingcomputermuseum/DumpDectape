@@ -5,12 +5,12 @@ using System.Runtime.InteropServices;
 // General Information about an assembly is controlled through the following
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
-[assembly: AssemblyTitle("DumpPDP7")]
+[assembly: AssemblyTitle("DumpDectape")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("DumpPDP7")]
-[assembly: AssemblyCopyright("Copyright ©  2017")]
+[assembly: AssemblyProduct("DumpDectape")]
+[assembly: AssemblyCopyright("Copyright ©  2017 LCM+L")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 

@@ -1,6 +1,7 @@
 / TD8E 18-bit DECtape DUMP Program.  Based on DUMPREST code from D. Gesswein
 / (see ftp://ftp.pdp8online.com/software/dumprest).
-/ Modified for 18-bit DECtape w/standard checksum imaging by J. Dersch
+/ Modified for 18-bit DECtape w/standard checksum imaging and arbitrary-lengths
+/ by J. Dersch
 /
 / This program will send a DECtape image out the console port.
 / The format of the data sent is 0xff (0377) or 0xfd if read error

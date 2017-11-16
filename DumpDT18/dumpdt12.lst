@@ -1,0 +1,796 @@
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 1
+
+
+    1              / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code from D. Gesswein
+    2              / (see ftp://ftp.pdp8online.com/software/dumprest).
+    3              / Modified to handle arbitrary-length tapes by J. Dersch
+    4              /
+    5              / This program will send a DECtape image out the console port.
+    6              / The format of the data sent is 0xff (0377) or 0xfd if read error
+    7              / followed by 129 12-bit words of data for each block.
+    8              / After the last block a 0xfe (0376) is sent
+    9              / with a two byte checksum, low 8 bits first then upper 4.
+   10              / The words in a block are sent as three bytes for each 2 words.
+   11              /   1 = low 8 bits first word
+   12              /   2 = upper 4 bits first and lower 4 bits second
+   13              /   3 = upper 8 bits second word
+   14              /
+   15              / The program (PC) receiving the data should be started before this program.
+   16              /
+   17              / To run, start at 0200.
+   18              /    SR 11 should be drive, only 0 and 1 supported without reassembling
+   19              /    SR 6-8 should be maximum memory field in computer, needs 8k minimum
+   20              /
+   21              / The receiving program should be running first.
+   22              / At normal exit hitting cont will restart the program.
+   23              /
+   24              / Should halt at label finish (140) with number of recoverable errors in AC
+   25              / The current block being read will be displayed in the AC
+   26              / while running.
+   27              /
+   28              / The PC program will print out the bad location if an error occurs.
+   29              /
+   30              / We will retry each read up to four times on error.
+   31              /
+   32              / This transfers the standard 129 word by 1474 blocks used by 12-bit DEC hardware,
+   33              / using standard checksums (as used by the PDP-9 and later machines).
+   34              / It will read as many blocks are present up to the forward end-zone, so it will
+   35              / handle tapes that vary from the standard block length.
+   36              /
+   37        0030          INAD=030                / Address of serial input, 30 for console
+   38        6030          KCF2=6000 INAD
+   39        6031          KSF2=6001 INAD
+   40        6032          KCC2=6002 INAD
+   41        6034          KRS2=6004 INAD
+   42        6035          KIE2=6005 INAD
+   43        6036          KRB2=6006 INAD
+   44              
+   45        0040          OUTAD=040               / Address of serial output, 40 for console
+   46        6040          TFL2=6000 OUTAD
+   47        6041          TSF2=6001 OUTAD
+   48        6042          TCF2=6002 OUTAD
+   49        6044          TPC2=6004 OUTAD
+   50        6045          TSK2=6005 OUTAD
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 2
+
+
+   51        6046          TLS2=6006 OUTAD
+   52              
+   53              
+   54              /CODE BASED ON:
+   55              /2 TD8E INITIALIZER PROGRAM, V7A
+   56              /
+   57              /COPYRIGHT (C) 1975, 1977
+   58              /DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+   59              /
+   60              /
+   61              /
+   62              /THIS SOFTWARE IS FURNISHED UNDER A LICENSE FOR USE ONLY ON A
+   63              /SINGLE COMPUTER SYSTEM AND MAY BE COPIED ONLY WITH THE INCLU-
+   64              /SION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE, OR ANT OTHER
+   65              /COPIES THEREOF, MAY NOT BR PROVIDED OR OTHERWISE MADE AVAILABLE
+   66              /TO ANY OTHER PERSON EXCEPT FOR USE ON SUCH SYSTEM AND TO ONE WHO
+   67              /AGREES TO THESE LICENSE TERMS.  TITLE TO AND OWNERSHIP OF THE
+   68              /SOFTWARE SHALL AT ALL TIMES REMAIN IN DEC.
+   69              /
+   70              /
+   71              /THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE WITHOUT
+   72              /NOTICE AND SHOULD NOT BE CONSTRUED AS A COMMITMENT BY DIGITAL
+   73              /EQUIPMRNT COROPATION.
+   74              /
+   75              /DEC ASSUMES NO RESPONSIBILITY FOR THE USE OR RELIABILITY OF ITS
+   76              /SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DEC.
+   77              /
+   78              /
+   79              /
+   80              /
+   81              /
+   82              /
+   83              
+   84              /DECEMBER 21, 1973              GB/RL/EF/SR
+   85              
+   86              /ABSTRACT--
+   87              /       THE ROUTINE DESCRIBED AND LISTED HERE IS A GENERAL
+   88              /DATA HANDLER FOR THE TD8E DECTAPE SYSTEM. THE ROUTINE
+   89              /CONTAINS SEARCH, READ, AND WRITE FUNCTIONS IN A FORMAT
+   90              /WHICH IS COMPATIBLE WITH OS/8 DEVICE HANDLER CALLING
+   91              /SEQUENCES.
+   92              
+   93              /FIXES SINCE FIELD-TEST RELEASE:
+   94              
+   95              /1.     FIXED BUG RE CLA ON RETRY AFTER ERROR
+   96              /2.     ALLOWED FINAL BOOTSTRAP TO BE INTO A WRITE-LOCKED DEVICE
+   97              
+   98              /OS/8 V3D CHANGES:
+   99              
+  100              /3.     FIXED BUG RE TD8E BUILD (V6B PATCH)
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 3
+
+
+  101              
+  102              /THIS ROUTINE CAN BE RE-EDITED AND ASSEMBLED TO PRODUCE
+  103              /VARIATIONS ON THE BASIC TD8E SYSTEM. ASSEMBLY PARAMETERS
+  104              /CONTROL:
+  105              /A) WHAT DRIVES (UNITS 0-7) WILL BE USED
+  106              /B) THE ORIGIN OF THE TWO PAGE ROUTINE
+  107              /C) WHAT MEMORY FIELD THE ROUTINE WILL RUN IN
+  108              /D) THE SIZE OF THE DECTAPE BLOCK TO BE READ/WRITTEN
+  109              
+  110              /FOLLOWING ARE THE PARAMETERS SET UP FOR THE STANDARD
+  111              /DEC VERSION OF THIS ROUTINE:
+  112              
+  113        0010          DRIVE=10        /UNITS 0 AND 1 SELECTED
+  114        0600          ORIGIN=600      /ENTER AT ORIGIN, ORIGIN+4
+  115        0000          AFIELD=0        /INITIAL FIELD SETTING
+  116        0000          MFIELD=00       /AFIELD*10=MFIELD
+  117        0201          WDSBLK=201      /129 12-BIT WORDS PER BLOCK
+  118              
+  119              /THE USE OF THE PARAMETERS IS AS FOLLOWS:
+  120              
+  121              / DRIVE: DRIVE DETERMINES WHICH UNITS WILL BE SELECTED
+  122              /       DRIVE=10 IMPLIES UNITS 0 &1
+  123              /       DRIVE=20 IMPLIES UNITS 2&3
+  124              /       DRIVE=30 IMPLIES UNITS 4&5
+  125              /       DRIVE=40 IMPLIES UNITS 6&7
+  126              
+  127              /ORIGIN: ALTERING ORIGIN CAUSES ASSEMBLY IN A DIFFERENT
+  128              /       MEMORY LOCATION. WHEN CHANGING ORIGIN KEEP IN MIND
+  129              /THAT THIS IS A TWO PAGE ROUTINE.
+  130              
+  131              /AFIELD: AFIELD DETERMINES THE INITIAL FIELD SETTING FOR THE
+  132              /       LOADER. PERMISSIBLE VALUES FOR AFIELD ARE 0 TO 7.
+  133              
+  134              /MFIELD: MFIELD IS USED IN A CIF CDF MFIELD INSTRUCTION.
+  135              /       THE VALUE INSERTED FOR MFIELD SHOULD BE 10(8) TIMES
+  136              /       THE VALUE FOR AFIELD. THE PERMISSIBLE VALUES ARE 00-70.
+  137              
+  138              /WDSBLK: WDSBLK GOVERNS HOW MANY WORDS THE ROUTINE THINKS ARE
+  139              /       IN A DECTAPE BLOCK. THE STANDARD VALUE IS 201(8) OR
+  140              /       128 DECIMAL. NOTE THAT THE FUNCTION WORD BIT 10 CAN
+  141              / 129 DECIMAL ??? (DJG)
+  142              /       BE USED TO SUBTRACT ONE FROM WDSBLK. THE VALUE USED
+  143              /       FOR WDSBLK SHOULD BE THE NUMBER OF WORDS THE TAPE WAS
+  144              /       FORMATTED TO CONTAIN.
+  145              
+  146              /IF WE WANT A HANDLER FOR UNITS 2&3 TO RESIDE IN
+  147              /FIELD 2 AT LOCATION 3000 AND READ/WRITE 256(10) WORDS
+  148              /PER BLOCK, THE PARAMETERS WOULD BE:
+  149              /       DRIVE=20
+  150              /       ORIGIN=3000
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 4
+
+
+  151              /       AFIELD=2
+  152              /       MFIELD=20
+  153              /       WDSBLK=400
+  154              /THE CALL TO THE SUBROUTINE FOLLOWS BASICALLY THE
+  155              /CALLING SEQUENCE FOR OS/8 DEVICE HANDLERS.
+  156              /THE CALLING SEQUENCE IS:
+  157              
+  158              /       CDF CURRENT
+  159              /       CIF MFIELD      /MFIELD=FIELD ASSEMBLED IN
+  160              /       JMS ENTRY       /ENTRY=ORIGIN (EVEN NUMBERED DRIVE
+  161                                      /AND ORIGIN+4 FOR ODD NUMBERED DRIVE.
+  162              /       ARG1
+  163              /       ARG1B (DJG)
+  164              /       ARG2
+  165              /       ARG3
+  166              /       ERROR RETURN
+  167              /       NORMAL RETURN
+  168              
+  169              /THE ARGUMENTS ARE:
+  170              
+  171              /ARG1: FUNCTION WORD    BIT0: 0=READ, 1=WRITE
+  172              /                       BITS 1-5: UNUSED, WAS # BLOCKS IN OPERATION (DJG)
+  173              /                       BITS 6-8: FIELD OF BUFFER AREA
+  174              /                       BIT 9: UNUSED
+  175              /                       BIT 10: # OF WORDS/BLOCK.
+  176              /                       0= WDSBLK, 1=WDSBLK-1
+  177              /                       BIT 11: 1=START FORWARD, 0=REVERSE
+  178              /ARG1A: # OF BLOCKS IN OPERATIONA (DJG)
+  179              /ARG2: BUFFER ADDRESS FOR OPERATION
+  180              /ARG3: STARTING BLOCK FOR OPERATION
+  181              
+  182              /ERRORS: THE HANDLER DETECTS TWO TYPES OF ERRORS:
+  183              /A) FATAL ERRORS- PARITY ERROR, TIMING ERROR,
+  184              /               TOO GREAT A BLOCK NUMBER
+  185              /       FATAL ERRORS TAKE ERROR RETURN WITH THE
+  186              /       AC=4000.
+  187              /B) NON-FATAL- SELECT ERROR.
+  188              /       IF NO PROPER UNIT IS SELECTED, THE ERROR
+  189              /       RETURN IS TAKEN WITH CLEAR AC.
+  190              /FATAL ERRORS TRY THREE TIMES BEFORE TAKING ERROR RETURN.
+  191              /THE NORMAL RETURN IS TAKEN AFTER ALL INDICATED
+  192              /BLOCKS HAVE BEEN TRANSFERRED. THE AC IS CLEAR.
+  193              
+  194              /THE TD8E IOT'S ARE:
+  195        6771          SDSS=7001-DRIVE /SKIP ON SINGLE LINE FLAG
+  196        6772          SDST=7002-DRIVE /SKIP ON TIMING ERROR
+  197        6773          SDSQ=7003-DRIVE /SKIP ON QUAD LINE FLAG
+  198        6774          SDLC=7004-DRIVE /LOAD COMMAND REGISTER
+  199        6775          SDLD=7005-DRIVE /LOAD DATA REGISTER
+  200        6776          SDRC=7006-DRIVE /READ COMMAND REGISTER
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 5
+
+
+  201        6777          SDRD=7007-DRIVE /READ DATA REGISTER
+  202              
+  203              /THE IOT'S IN GENERAL ARE 677X,676X,675X,AND 674X.
+  204              /THE OTHERS CONTROL UNITS 2-7.
+  205              
+  206              /       THIS HANDLER USES DECTAPE BLOCKS NOT OS/8 BLOCKS !
+  207              
+  208        0600          *ORIGIN
+  209              
+  210              /       MODIFIED SO BIT 0 ON ENTRY IS UNIT 1
+  211 00600  0000  DTA0,   0
+  212 00601  3047          DCA UNIT        /SAVE UNIT POSITION
+  213 00602  6214          RDF
+  214 00603  1360          TAD C6203       /GET DATA FIELD AND SETUP RETURN
+  215 00604  3356          DCA LEAVE
+  216 00605  1600          TAD I DTA0      /GET FUNCTION WORD
+  217 00606  6775          SDLD            /PUT FUNCTION INTO DATA REGISTER
+  218 00607  7200          CLA
+  219 00610  1022          TAD MWORDS
+  220 00611  3023          DCA WCOUNT      /STORE MASTER WORD COUNT
+  221 00612  2200          ISZ DTA0        /TO BLOCK COUNT (DJG)
+  222 00613  1600          TAD I DTA0      / (DJG)
+  223 00614  7041          CIA             / (DJG)
+  224 00615  3051          DCA PGCT        / (DJG)
+  225 00616  2200          ISZ DTA0        /TO BUFFER
+  226 00617  1600          TAD I DTA0
+  227 00620  3044          DCA XBUFF       /SAVE ADDRESS (DJG)
+  228 00621  2200          ISZ DTA0        /TO BLOCK NUMBER
+  229 00622  1600          TAD I DTA0
+  230 00623  3046          DCA BLOCK
+  231 00624  2200          ISZ DTA0        /POINT TO ERROR EXIT
+  232 00625  6203          CIF CDF MFIELD  /TO ROUTINES DATA FIELD
+  233 00626  6777          SDRD
+  234 00627  0376          AND C70         /GET FIELD FOR XFER
+  235 00630  1361          TAD C6201       /FORM CDF N
+  236 00631  3251          DCA XFIELD      /IF=0 AND DF=N AT XFER.
+  237 00632  1047          TAD UNIT        /TEST FOR SELECT ERROR
+  238 00633  6774          SDLC
+  239 00634  7200          CLA             / Moved here because my drive 1 is slow selecting
+  240 00635  1020          TAD RETRY
+  241 00636  3050          DCA TRYCNT      /3 ERROR TRIES
+  242 00637  6776          SDRC
+  243 00640  0364          AND C100
+  244 00641  7640          SZA CLA
+  245 00642  5351          JMP FATAL-1
+  246 00643  6777          SDRD            /PUT FUNCT INTO XFUNCT IN SECOND PG.
+  247 00644  3763          DCA I CXFUN
+  248 00645  1023          TAD WCOUNT
+  249 00646  3452          DCA I CXWCT
+  250 00647  6777          SDRD            /GET MOTION BIT TO LINK
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 6
+
+
+  251 00650  7110          CLL RAR
+  252 00651  7402  XFIELD, HLT             /INTO NEXT PAGE
+  253 00652  5263          JMP GO          /AND START THE MOTION.
+  254 00653  6772  RWCOM,  SDST            /ANY CHECKSUM ERRORS?
+  255 00654  7640          SZA CLA         /OR CHECKSUM ERRORS?
+  256 00655  5341          JMP TRY3        /PLEASE NOTE THAT THE LINK IS ALWAYS
+  257                                      /SET AT RWCOM. GETCHK SETS IT.
+  258 00656  2051          ISZ PGCT        / (DJG)
+  259 00657  7410          SKP             / (DJG)
+  260 00660  5350          JMP EXIT        /ALL DONE. GET OUT
+  261 00661  2046          ISZ BLOCK       /NEXT BLOCK TO XFER
+  262 00662  7120          CLL CML         /FORCES MOTION FORWARD
+  263 00663  7232  GO,     CLA CML RTR     /LINK BECOMES MOTION BIT
+  264 00664  1365          TAD C1000
+  265 00665  1047          TAD UNIT        /PUT IN 'GO' AND UNIT #
+  266 00666  6774          SDLC            /LOOK FOR BLOCK NO.
+  267 00667  7200          CLA
+  268 00670  1044          TAD XBUFF
+  269 00671  3043          DCA OLDBUF
+  270 00672  6214          RDF
+  271 00673  1361          TAD C6201
+  272 00674  3342          DCA OLDFLD
+  273 00675  4762          JMS I CRDQUD    /WAIT AT LEAST 6 LINES TO LOOK
+  274 00676  4762          JMS I CRDQUD
+  275 00677  7600  CM200,  7600            /COULD HAVE SAVED A LOC. HERE
+  276 00700  6771  SRCH,   SDSS
+  277 00701  5300          JMP .-1         /WAIT FOR SINGLE LINE FLAG
+  278 00702  6776          SDRC
+  279 00703  7106          CLL RTL         /DIRECTION TO LINK. INFO BITS
+  280                                      /ARE SHIFTED.
+  281 00704  0045          AND C374        /ISOLATE MARK TRACK BITS
+  282 00705  1323          TAD M110        /IS IT END ZONE?
+  283 00706  7450          SNA             /THE LINK STAYS SAME THRU THIS
+  284 00707  5331          JMP ENDZ
+  285 00710  1053          TAD M20         /CHECK FOR BLOCK MARK
+  286 00711  7640          SZA CLA
+  287 00712  5300          JMP SRCH
+  288 00713  6777          SDRD            /GET THE BLOCK NUMBER
+  289 00714  7430          SZL             /IF WE ARE IN REVERSE, LOOK FOR 3
+  290                                      /BLOCKS BEFORE TARGET BLOCK. THIS
+  291                                      /ALLOWS TURNAROUND AND UP TO SPEED.
+  292 00715  1377          TAD C3          /REVERSE
+  293 00716  7040          CMA
+  294 00717  1046          TAD BLOCK
+  295 00720  7040          CMA             /IS IT RIGHT BLOCK?
+  296 00721  7450          SNA
+  297 00722  5372          JMP FOUND       /YES..HOORAY!
+  298 00723  7670  M110,   SZL SNA CLA     /NO, BUT ARE WE HEADED FOR IT?
+  299                                      /ABOVE SNA IS SUPERFLUOUS.
+  300 00724  5300          JMP SRCH        /YES
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 7
+
+
+  301 00725  6776          SDRC            /NO, TURN US AROUND.
+  302 00726  7106          CLL RTL         /DIRECTION TO LINK
+  303 00727  7200          CLA             /THIS CODE USED TO BE SHARED WITH ENDZ,
+  304 00730  5263          JMP GO          /BUT NOW ENDZ HANDLES END OF TAPE CASES ONLY.
+  305 00731  6776  ENDZ,   SDRC            /WE ARE IN THE END ZONE
+  306 00732  7106          CLL RTL         /DIRECTION TO LINK
+  307 00733  7630          SZL CLA         /ARE WE IN REVERSE?
+  308 00734  5263          JMP GO          /YES..TURN US AROUND
+  309 00735  1046          TAD BLOCK       /IF WE ARE ON BLOCK ZERO, IT IS POSSIBLE FOR US TO BE AT THE
+  310                                      /REVERSE ENDZONE GOING FORWARD, EITHER DUE TO A RETRY OR BECAUSE
+  311                                      /THE TAPE WAS STARTED IN A POSITION BEFORE THE END ZONE.
+  312                                      /THESE CASES SHOULD NOT BE TREATED AS END-OF-TAPE.
+  313 00736  7640          SZA CLA
+  314 00737  5353          JMP ENDEX       /END OF TAPE.  STOP THE UNIT AND TAKE THE END EXIT.
+  315 00740  5263          JMP GO
+  316              
+  317 00741  7200  TRY3,   CLA
+  318 00742  7000  OLDFLD, NOP
+  319 00743  1043          TAD OLDBUF
+  320 00744  3044          DCA XBUFF
+  321 00745  2050          ISZ TRYCNT
+  322 00746  5263          JMP GO          /TRY 3 TIMES
+  323 00747  5352          JMP FATAL       /LINK OFF MEANS AC=4000 ON RETURN
+  324 00750  2200  EXIT,   ISZ DTA0        /TAKE THE NORMAL RETURN
+  325 00751  7120          CLL CML         /AC=0 ON NORMAL RETURN
+  326 00752  2200  FATAL,  ISZ DTA0        /TAKE THE ERROR RETURN
+  327 00753  1047  ENDEX,  TAD UNIT
+  328 00754  6774          SDLC            /STOP THE UNIT
+  329 00755  7230          CLA CML RAR
+  330 00756  7402  LEAVE,  HLT
+  331 00757  5600          JMP I DTA0
+  332              
+  333              
+  334 00760  6203  C6203,  6203
+  335 00761  6201  C6201,  6201
+  336 00762  1060  CRDQUD, RDQUAD
+  337 00763  1120  CXFUN,  XFUNCT
+  338 00764  0100  C100,   100
+  339 00765  1000  C1000,  1000
+  340              
+  341              
+  342                      / NOTE THAT THE ABOVE CODE SEGMENT COMES VERY CLOSE TO TOUCHING
+  343                      / THIS ONE, AND THIS ONE MUST RESIDE AT THE END OF THIS PAGE.
+  344                      / BE CAREFUL ADDING NEW CODE TO THE ABOVE PAGE.
+  345        0772          *ORIGIN+172
+  346 00772  7630  FOUND,  SZL CLA         /RIGHT BLOCK. HOW ABOUT DIRECTION?
+  347 00773  5263          JMP GO          /WRONG..TURN AROUND
+  348 00774  1047          TAD UNIT        /PUT UNIT INTO LINK
+  349 00775  7104          CLL RAL         /AC IS NOW 0
+  350 00776  0070  C70,    70              /********DON'T MOVE THIS!!!!******
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 8
+
+
+  351 00777  0003  C3,     3
+  352                                      /INTO NEXT PAGE
+  353        1000         *ORIGIN+200
+  354 01000  6202          CIF MFIELD
+  355 01001  7010          RAR             /NOW GET UNIT #
+  356 01002  3265          DCA XUNIT
+  357 01003  6776          SDRC
+  358 01004  6774          SDLC
+  359 01005  6771  REVGRD, SDSS
+  360 01006  5205          JMP .-1         /LOOK FOR REVERSE GUARD
+  361 01007  6776          SDRC
+  362 01010  0222          AND K77
+  363 01011  1321          TAD CM32        /IS IT REVERSE GUARD?
+  364 01012  7640          SZA CLA
+  365 01013  5205          JMP REVGRD      /NO.KEEP LOOKING
+  366 01014  1325          TAD XWCT
+  367 01015  3324          DCA WORDS       /WORD COUNTER
+  368 01016  1320          TAD XFUNCT      /GET FUNCTION  READ OR WRITE
+  369 01017  7700  K7700,  SMA CLA
+  370 01020  5223          JMP READ        /NEG. IS WRITE
+  371 01021  7402  WRITE,  HLT             /WRITE CODE REMOVED
+  372 01022  0077  K77,    77              /ABOVE MAY SKIP (NOT ANYMORE DJG)
+  373 01023  4260  READ,   JMS RDQUAD
+  374 01024  4260          JMS RDQUAD
+  375 01025  4260          JMS RDQUAD      /SKIP CONTROL WORDS
+  376 01026  0222          AND K77
+  377 01027  1217          TAD K7700       /TACK 7700 ONTO CHECKSUM.
+  378 01030  3323          DCA CHKSUM      /CHECKSUM ONLY LOW 6 BITS ANYWAY
+  379 01031  4260  RDLP,   JMS RDQUAD
+  380 01032  4265          JMS EQUFUN      /COMPUT CHECKSUM AS WE GO
+  381 01033  3444          DCA I XBUFF     /IT GETS CONDENSED LATER
+  382 01034  2044          ISZ XBUFF       /AT END OF FIELD?
+  383 01035  5242          JMP STFLD2+1    /NOT AT END OF FIELD (DJG)
+  384 01036  6214          RDF
+  385 01037  1377          TAD (6211
+  386 01040  3241          DCA STFLD2
+  387 01041  7000  STFLD2, NOP
+  388 01042  2324          ISZ WORDS       /DONE THIS OP?
+  389 01043  5231          JMP RDLP        /NO SUCH LUCK
+  390 01044  1320          TAD XFUNCT      /IF OP WAS FOR WDSBLK-1, READ AND
+  391 01045  7112          CLL RTR         /CHECKSUM THE LAST TAPE WORD
+  392 01046  7620          SNL CLA
+  393 01047  5252          JMP RDLP2
+  394 01050  4260          JMS RDQUAD      /NOT NEEDED FOR WDSBLK/BLOCK
+  395 01051  4265          JMS EQUFUN      /CHECKSUM IT
+  396 01052  4260  RDLP2,  JMS RDQUAD      /READ CHECKSUM
+  397 01053  0217          AND K7700
+  398 01054  4265          JMS EQUFUN
+  399 01055  4302          JMS GETCHK      /GET SIX BIT CHECKSUM
+  400 01056  5717          JMP I CRWCOM
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro     Page 9
+
+
+  401 01057  0300  C300,   300             /PROTECTION (NOT ANYMORE DJG)
+  402              
+  403 01060  0000  RDQUAD, 0               /READ A 12 BIT WORD
+  404 01061  6773          SDSQ
+  405 01062  5261          JMP .-1
+  406 01063  6777          SDRD            /READ DATA
+  407 01064  5660          JMP I RDQUAD
+  408              
+  409              XUNIT,
+  410 01065  0000  EQUFUN, 0               /COMPUTE EQUIVALENCE CHECKSUM
+  411 01066  7040          CMA
+  412 01067  3326          DCA EQUTMP      /ACTUALLY CHECKSUMS ON DECTAPE ARE
+  413 01070  1326          TAD EQUTMP      /EQUIVALENCE OF ALL WORDS IN A RECORD
+  414 01071  0323          AND CHKSUM      /SIX BITS AT A TIME. BUT SINCE EQUIVALENCE
+  415 01072  7041          CIA             /IS ASSOCIATIVE, WE CAN DO IT 12
+  416 01073  7104          CLL RAL         /BITS AT A TIME AND CONDENSE LATER.
+  417 01074  1326          TAD EQUTMP      /THIS ROUTINE USES THESE IDENTITIES:
+  418 01075  1323          TAD CHKSUM      /A+B=(A.XOR.B)+2*(A.AND.B)
+  419 01076  3323          DCA CHKSUM      /A.EQU.B=.NOT.(A.XOR.B)=A.XOR.(.NOT.B)
+  420 01077  1326          TAD EQUTMP      /A.EQU.B=(A+(.NOT.B))-2*(A.AND.(.NOT.B))
+  421 01100  7040          CMA
+  422 01101  5665          JMP I EQUFUN
+  423              
+  424 01102  0000  GETCHK, 0               /FORM 6 BIT CHECKSUM
+  425 01103  7200          CLA
+  426 01104  1323          TAD CHKSUM
+  427 01105  7040          CMA
+  428 01106  7106          CLL RTL
+  429 01107  7006          RTL
+  430 01110  7006          RTL
+  431 01111  4265          JMS EQUFUN
+  432 01112  7320          CLA CLL CML     /FORCES LINK ON AT RWCOM
+  433 01113  1323          TAD CHKSUM
+  434 01114  0217          AND K7700
+  435 01115  5702          JMP I GETCHK
+  436              
+  437 01116  0752  CFATAL, FATAL
+  438 01117  0653  CRWCOM, RWCOM
+  439 01120  0000  XFUNCT, 0
+  440 01121  7746  CM32,   -32
+  441 01122  1400  C1400,  1400
+  442 01123  0000  CHKSUM, 0
+  443 01124  0000  WORDS,  0
+  444 01125  0000  XWCT,   0
+  445 01126  0000  EQUTMP, 0
+  446              
+      01177  6211
+  447        0020          *20
+  448 00020  7774  RETRY,  7774            / RETRY UP TO 4 TIME
+  449 00021  3777  NUMBLK, 3777            / MAX NUMBER OF BLOCKS TO ATTEMPT READING.  BY DEFAULT THIS PROGRAM WILL READ UNTIL
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 10
+
+
+  450                                      / IT HITS THE END OF THE TAPE (FORWARD ENDZONE).  IF YOU NEED TO LIMIT THE NUMBER OF BLOCKS
+  451                                      / READ, MODIFY THIS VALUE.
+  452 00022  7577  MWORDS, -WDSBLK         / WORDS PER BLOCK
+  453 00023  0000  WCOUNT, 0
+  454 00024  0036  BLKFLD, 36              / 30 129 WORD BLOCKS OF 12-BIT WORDS
+  455                                      / WRAPPING PAST END OF LAST FIELD DOESN'T WORK
+  456 00025  0000  FIELDS, 0
+  457 00026  0000  RDSIZE, 0               / NUMBER BLOCKS PER READ
+  458 00027  0000  CBLOCK, 0               / CURRENT BLOCK TO XFER
+  459 00030  0000  CLKSUM, 0
+  460 00031  0000  DRVSEL, 0
+  461 00032  0377  READST, 377
+  462 00033  0000  LOC,    0
+  463 00034  0000  LEN,    0
+  464 00035  0000  BCNT,   0               / BLOCKS TO SEND TO PC
+  465 00036  0000  TEMP,   0
+  466 00037  0017  C17,    17
+  467 00040  0360  C360,   360
+  468 00041  0000  CHKSM,  0
+  469 00042  0000  ERRCN2, 0
+  470 00043  0000  OLDBUF, 0               / BELOW ARE USED BY DTA0 ROUTINE
+  471 00044  0000  XBUFF,  0
+  472 00045  0374  C374,   374
+  473 00046  0000  BLOCK,  0
+  474 00047  0000  UNIT,   0
+  475 00050  7775  TRYCNT, -3
+  476 00051  0000  PGCT,   0
+  477 00052  1125  CXWCT,  XWCT
+  478 00053  7760  M20,    -20
+  479              
+  480        0140          *140
+  481 00140  7402  FINISH, HLT             / Normal good halt
+  482 00141  5777@         JMP START
+  483              
+  484        0200          *200
+  485 00200  6201  START,  CDF 0
+  486 00201  6007          CAF
+  487 00202  7704          CLA CLL OSR     / Get drive
+  488 00203  0377          AND (1
+  489 00204  7012          RTR
+  490 00205  3031          DCA DRVSEL
+  491 00206  7704          CLA CLL OSR     / Get max field
+  492 00207  7012          RTR
+  493 00210  7010          RAR
+  494 00211  0376          AND (7
+  495 00212  7450          SNA
+  496 00213  7402          HLT             / Must have at least 1 field for buffer
+  497 00214  7041          CIA
+  498 00215  3025          DCA FIELDS
+  499 00216  3042          DCA ERRCN2
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 11
+
+
+  500 00217  1024  RDSZLP, TAD BLKFLD      / Multiply by number of fields available
+  501 00220  2025          ISZ FIELDS
+  502 00221  5217          JMP RDSZLP
+  503 00222  3026          DCA RDSIZE      / NUMBER BLOCK PER READ
+  504 00223  3027          DCA CBLOCK
+  505 00224  3041          DCA CHKSM
+  506              
+  507 00225  7200  DUMPLP, CLA
+  508 00226  1026          TAD RDSIZE
+  509 00227  1027          TAD CBLOCK
+  510 00230  7041          CIA
+  511 00231  1021          TAD NUMBLK      / MORE BLOCKS LEFT THAN READSIZE?
+  512 00232  7500          SMA             / NO, READ NUMBER LEFT
+  513 00233  7200          CLA             / YES, ONLY READ RDSIZE
+  514 00234  1026          TAD RDSIZE
+  515 00235  7450          SNA             / ANY MORE BLOCKS?
+  516 00236  5270          JMP DONE        / NO, DO FINISH STUFF
+  517 00237  3245          DCA ARGSZ
+  518 00240  1027          TAD CBLOCK
+  519 00241  3247          DCA ARGBK
+  520 00242  1031          TAD DRVSEL
+  521 00243  4775@         JMS DTA0
+  522 00244  0010          0010              / READ STARTING IN FIELD 1
+  523 00245  0000  ARGSZ,  0
+  524 00246  0000          0
+  525 00247  0000  ARGBK,  0
+  526 00250  5774@         JMP ENDRET      / TAKEN WHEN END OF TAPE IS HIT
+  527 00251  5323          JMP ERRRET      / TAKEN WHEN AN ERROR IS ENCOUNTERED
+  528 00252  1373          TAD (377        / All blocks good
+  529 00253  3032          DCA READST
+  530                                      / Send data, each block starts with FF
+  531 00254  7300          CLA CLL         / then 2 12 bit words in 3 bytes
+  532 00255  3033          DCA LOC         / ERRRET DUPLICATES SOME OF THIS
+  533 00256  1245          TAD ARGSZ
+  534 00257  7041          CIA
+  535 00260  3035          DCA BCNT        / Setup loop counter with number blocks read
+  536 00261  6211          CDF 10
+  537 00262  4772@ OUTBL1, JMS OUTBLK      / Send a block
+  538 00263  2027          ISZ CBLOCK
+  539 00264  2035          ISZ BCNT        / Send all read?
+  540 00265  5262          JMP OUTBL1      / No
+  541 00266  6201          CDF 0
+  542 00267  5225          JMP DUMPLP      / Go read next batch
+  543              
+  544              
+  545 00270  7200  DONE,   CLA             / Send FE and -checksum of all words
+  546 00271  1371          TAD (376
+  547 00272  4770@         JMS PUN
+  548 00273  7300          CLA CLL
+  549 00274  1041          TAD CHKSM       / Send checksum in two bytes, low bits first
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 12
+
+
+  550 00275  7041          CIA
+  551 00276  4770@         JMS PUN
+  552 00277  7300          CLA CLL
+  553 00300  1041          TAD CHKSM
+  554 00301  7041          CIA
+  555 00302  7012          RTR
+  556 00303  7012          RTR
+  557 00304  7012          RTR
+  558 00305  7012          RTR
+  559 00306  0037          AND C17
+  560 00307  4770@         JMS PUN
+  561 00310  7200          CLA
+  562 00311  1031          TAD DRVSEL
+  563 00312  4775@         JMS DTA0        / REWIND TAPE
+  564 00313  0010          0010
+  565 00314  0001          1
+  566 00315  0000          0
+  567 00316  0000          0
+  568 00317  7000          NOP
+  569 00320  7000          NOP
+  570 00321  1042          TAD ERRCN2      / Leave AC with # of errors
+  571 00322  5140          JMP FINISH
+  572              
+  573                                      /SEND GOOD BLOCKS READ WITH GOOD BLOCK FLAG
+  574                                      /THEN BAD WITH BAD BLOCK FLAG.
+  575              ERRRET,
+  576              /       HLT             / ****** If we want to stop on error
+  577 00323  6211          CDF 10
+  578 00324  7300          CLA CLL
+  579 00325  3033          DCA LOC
+  580 00326  1027          TAD CBLOCK
+  581 00327  7041          CIA
+  582 00330  1046          TAD BLOCK       /Get - number good blocks read
+  583 00331  7041          CIA             /Last was bad
+  584 00332  7450          SNA     
+  585 00333  5343          JMP FSTBAD      /First block is bad, no good to send
+  586 00334  3035          DCA BCNT
+  587 00335  1373          TAD (377
+  588 00336  3032          DCA READST
+  589 00337  4772@ OUTBL2, JMS OUTBLK      /Send good blocks
+  590 00340  2027          ISZ CBLOCK
+  591 00341  2035          ISZ BCNT
+  592 00342  5337          JMP OUTBL2
+  593 00343  1367  FSTBAD, TAD (375        /NOW SEND BAD BLOCK
+  594 00344  3032          DCA READST
+  595 00345  4772@         JMS OUTBLK
+  596 00346  2027          ISZ CBLOCK
+  597 00347  2042          ISZ ERRCN2
+  598 00350  6201          CDF 0
+  599 00351  5225          JMP DUMPLP      /And read from here on
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 13
+
+
+  600              
+      00367  0375
+      00370  0511
+      00371  0376
+      00372  0422
+      00373  0377
+      00374  0400
+      00375  0600
+      00376  0007
+      00377  0001
+  601                      PAGE
+  602              ENDRET,                 /SEND LAST SET OF BLOCKS READ BEFORE END OF TAPE AND FINISH.
+  603 00400  6211          CDF 10
+  604 00401  7300          CLA CLL
+  605 00402  3033          DCA LOC
+  606 00403  1027          TAD CBLOCK
+  607 00404  7041          CIA
+  608 00405  1046          TAD BLOCK       / GET NUMBER OF BLOCKS READ IN LAST BATCH
+  609 00406  7040          CMA             / +1 to -BCNT SO WE SEND ALL BLOCKS
+  610 00407  7450          SNA
+  611 00410  5777@         JMP DONE        / READ ZERO BLOCKS IN LAST BATCH, WE ARE DONE
+  612 00411  3035          DCA BCNT
+  613 00412  1376          TAD (377
+  614 00413  3032          DCA READST
+  615 00414  4222  OUTBL3, JMS OUTBLK      / SEND ALL BLOCKS
+  616 00415  2027          ISZ CBLOCK
+  617 00416  2035          ISZ BCNT
+  618 00417  5214          JMP OUTBL3
+  619 00420  6201          CDF 0
+  620 00421  5777@         JMP DONE        / NO MORE BLOCKS, DONE.
+  621              
+  622 00422  0000  OUTBLK, 0               /Send a block of data out serial port
+  623 00423  7200          CLA
+  624 00424  1023          TAD WCOUNT
+  625 00425  3034          DCA LEN
+  626 00426  1032          TAD READST      /Send good/bad flag
+  627 00427  4311          JMS PUN
+  628 00430  7300  OUT,    CLA CLL
+  629 00431  1433          TAD I LOC
+  630 00432  1041          TAD CHKSM       / Keep checksum of all words sent
+  631 00433  3041          DCA CHKSM
+  632 00434  1433          TAD I LOC       / Send 2 words as 3 bytes
+  633 00435  4311          JMS PUN
+  634 00436  7300          CLA CLL
+  635 00437  1433          TAD I LOC
+  636 00440  7012          RTR             / Shift top 4 bits to low 4
+  637 00441  7012          RTR
+  638 00442  7012          RTR
+  639 00443  7012          RTR
+  640 00444  0037          AND C17
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 14
+
+
+  641 00445  3036          DCA TEMP
+  642 00446  2033          ISZ LOC
+  643 00447  5254          JMP STFLD3+1    /NOT AT END OF FIELD (DJG)
+  644 00450  6214          RDF             /At end, inc to next field
+  645 00451  1375          TAD (6211       /BUILD CDF
+  646 00452  3253          DCA STFLD3
+  647 00453  7000  STFLD3, NOP
+  648 00454  2034          ISZ LEN         /END OF BUFFER?
+  649 00455  7410          SKP             /NO
+  650 00456  5306          JMP ENDBK       /YES
+  651 00457  1433          TAD I LOC
+  652 00460  1041          TAD CHKSM
+  653 00461  3041          DCA CHKSM
+  654 00462  1433          TAD I LOC
+  655 00463  7006          RTL
+  656 00464  7006          RTL
+  657 00465  0040          AND C360
+  658 00466  1036          TAD TEMP
+  659 00467  4311          JMS PUN
+  660 00470  7300          CLA CLL
+  661 00471  1433          TAD I LOC
+  662 00472  7012          RTR
+  663 00473  7012          RTR
+  664 00474  4311          JMS PUN
+  665 00475  2033          ISZ LOC
+  666 00476  5303          JMP STFLD4+1    /NOT AT END OF FIELD (DJG)
+  667 00477  6214          RDF
+  668 00500  1375          TAD (6211       /BUILD CDF
+  669 00501  3302          DCA STFLD4
+  670 00502  7000  STFLD4, NOP
+  671 00503  2034          ISZ LEN
+  672 00504  5230          JMP OUT
+  673 00505  5622          JMP I OUTBLK
+  674 00506  1036  ENDBK,  TAD TEMP        /SEND LAST PART OF WORD
+  675 00507  4311          JMS PUN
+  676 00510  5622          JMP I OUTBLK
+  677              
+  678 00511  0000  PUN,    0               / Send byte out serial port
+  679              /       PLS             / Punch for testing with emulator
+  680 00512  6046          TLS2            / Send out console
+  681 00513  7300          CLA CLL
+  682 00514  1027          TAD CBLOCK
+  683              /       PSF
+  684 00515  6041          TSF2            /Wait until character sent
+  685 00516  5315          JMP .-1
+  686 00517  7200          CLA
+  687 00520  5711          JMP I PUN
+  688              
+      00575  6211
+      00576  0377
+
+
+
+      / TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code fro    Page 15
+
+
+      00577  0270
+      00177  0200
+  689                      $
+
+      No detected errors
+      12 links generated

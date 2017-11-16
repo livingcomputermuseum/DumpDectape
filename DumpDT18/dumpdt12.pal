@@ -1,10 +1,10 @@
-/ TD8E 18-bit DECtape DUMP Program.  Based on DUMPREST code from D. Gesswein
+/ TD8E 12-bit DECtape DUMP Program.  Based on DUMPREST code from D. Gesswein
 / (see ftp://ftp.pdp8online.com/software/dumprest).
-/ Modified for 18-bit PDP-7 550 DECtape imaging and arbitrary-lengths by J. Dersch
+/ Modified to handle arbitrary-length tapes by J. Dersch
 /
 / This program will send a DECtape image out the console port.
 / The format of the data sent is 0xff (0377) or 0xfd if read error
-/ followed by 384 12-bit words (256 18-bit words) of data for each block.
+/ followed by 129 12-bit words of data for each block.
 / After the last block a 0xfe (0376) is sent
 / with a two byte checksum, low 8 bits first then upper 4.
 / The words in a block are sent as three bytes for each 2 words.
@@ -29,15 +29,11 @@
 /
 / We will retry each read up to four times on error.
 /
-/ This transfers the standard 256 word by 578 blocks used by 18-bit DEC hardware,
-/ using PDP-7 550 controller checksums (1's complement 18-bit additive).
+/ This transfers the standard 129 word by 1474 blocks used by 12-bit DEC hardware,
+/ using standard checksums (as used by the PDP-9 and later machines).
 / It will read as many blocks are present up to the forward end-zone, so it will
-/ handle tapes that vary from the standard 1102(8) block length.
-/ NOTE: As the PDP-7 checksum takes significantly longer to calculate than the later
-/ XOR-based checksums, there is a chance that timeout errors may occur on certain
-/ combinations of drives, tapes, and controllers.
+/ handle tapes that vary from the standard block length.
 /
-
         INAD=030                / Address of serial input, 30 for console
         KCF2=6000 INAD
         KSF2=6001 INAD
@@ -54,7 +50,8 @@
         TSK2=6005 OUTAD
         TLS2=6006 OUTAD
 
-        /CODE BASED ON:
+
+/CODE BASED ON:
 /2 TD8E INITIALIZER PROGRAM, V7A
 /
 /COPYRIGHT (C) 1975, 1977
@@ -110,13 +107,14 @@
 /C) WHAT MEMORY FIELD THE ROUTINE WILL RUN IN
 /D) THE SIZE OF THE DECTAPE BLOCK TO BE READ/WRITTEN
 
-/ FOLLOWING ARE THE PARAMETERS SET UP FOR THE DEC 550 DECTAPE CONTROLLER:
+/FOLLOWING ARE THE PARAMETERS SET UP FOR THE STANDARD
+/DEC VERSION OF THIS ROUTINE:
 
         DRIVE=10        /UNITS 0 AND 1 SELECTED
         ORIGIN=600      /ENTER AT ORIGIN, ORIGIN+4
         AFIELD=0        /INITIAL FIELD SETTING
         MFIELD=00       /AFIELD*10=MFIELD
-        WDSBLK=600      /384 12-BIT WORDS PER BLOCK (256 18-BIT DATA WORDS)
+        WDSBLK=201      /129 12-BIT WORDS PER BLOCK
 
 /THE USE OF THE PARAMETERS IS AS FOLLOWS:
 
@@ -139,7 +137,9 @@
 
 /WDSBLK: WDSBLK GOVERNS HOW MANY WORDS THE ROUTINE THINKS ARE
 /       IN A DECTAPE BLOCK. THE STANDARD VALUE IS 201(8) OR
-/       128 DECIMAL. THE VALUE USED
+/       128 DECIMAL. NOTE THAT THE FUNCTION WORD BIT 10 CAN
+/ 129 DECIMAL ??? (DJG)
+/       BE USED TO SUBTRACT ONE FROM WDSBLK. THE VALUE USED
 /       FOR WDSBLK SHOULD BE THE NUMBER OF WORDS THE TAPE WAS
 /       FORMATTED TO CONTAIN.
 
@@ -172,7 +172,8 @@
 /                       BITS 1-5: UNUSED, WAS # BLOCKS IN OPERATION (DJG)
 /                       BITS 6-8: FIELD OF BUFFER AREA
 /                       BIT 9: UNUSED
-/                       BIT 10: UNUSED
+/                       BIT 10: # OF WORDS/BLOCK.
+/                       0= WDSBLK, 1=WDSBLK-1
 /                       BIT 11: 1=START FORWARD, 0=REVERSE
 /ARG1A: # OF BLOCKS IN OPERATIONA (DJG)
 /ARG2: BUFFER ADDRESS FOR OPERATION
@@ -250,10 +251,8 @@ DTA0,   0
         CLL RAR
 XFIELD, HLT             /INTO NEXT PAGE
         JMP GO          /AND START THE MOTION.
-RWCOM,  SDST            /ANY TD8E TIME ERRORS?
-        /JMP TIMEOK     /UNCOMMENT IF YOU SUSPECT TIMING ISSUES.
-        /HLT
-TIMEOK, SZA CLA         /OR CHECKSUM ERRORS?
+RWCOM,  SDST            /ANY CHECKSUM ERRORS?
+        SZA CLA         /OR CHECKSUM ERRORS?
         JMP TRY3        /PLEASE NOTE THAT THE LINK IS ALWAYS
                         /SET AT RWCOM. GETCHK SETS IT.
         ISZ PGCT        / (DJG)
@@ -339,9 +338,10 @@ CXFUN,  XFUNCT
 C100,   100
 C1000,  1000
 
+
         / NOTE THAT THE ABOVE CODE SEGMENT COMES VERY CLOSE TO TOUCHING
-        / THIS ONE, AND THE BELOW MUST RESIDE AT THE END OF THIS PAGE.
-        / BE CAREFUL ADDING NEW CODE TO THE ABOVE CODE.
+        / THIS ONE, AND THIS ONE MUST RESIDE AT THE END OF THIS PAGE.
+        / BE CAREFUL ADDING NEW CODE TO THE ABOVE PAGE.
         *ORIGIN+172
 FOUND,  SZL CLA         /RIGHT BLOCK. HOW ABOUT DIRECTION?
         JMP GO          /WRONG..TURN AROUND
@@ -368,14 +368,17 @@ REVGRD, SDSS
         TAD XFUNCT      /GET FUNCTION  READ OR WRITE
 K7700,  SMA CLA
         JMP READ        /NEG. IS WRITE
-WRITE,  HLT             /WRITE CODE REMOVED.
+WRITE,  HLT             /WRITE CODE REMOVED
 K77,    77              /ABOVE MAY SKIP (NOT ANYMORE DJG)
 READ,   JMS RDQUAD
         JMS RDQUAD
         JMS RDQUAD      /SKIP CONTROL WORDS
+        AND K77
+        TAD K7700       /TACK 7700 ONTO CHECKSUM.
+        DCA CHKSUM      /CHECKSUM ONLY LOW 6 BITS ANYWAY
 RDLP,   JMS RDQUAD
-        JMS P7CHK       /COMPUTE PDP-7 550 CHECKSUM AS WE GO        
-        DCA I XBUFF
+        JMS EQUFUN      /COMPUT CHECKSUM AS WE GO
+        DCA I XBUFF     /IT GETS CONDENSED LATER
         ISZ XBUFF       /AT END OF FIELD?
         JMP STFLD2+1    /NOT AT END OF FIELD (DJG)
         RDF
@@ -383,12 +386,17 @@ RDLP,   JMS RDQUAD
         DCA STFLD2
 STFLD2, NOP
         ISZ WORDS       /DONE THIS OP?
-        JMP RDLP        /NO SUCH LUCK        
-        JMS RDQUAD      /DONE: READ AND CHECKSUM LAST 18-BIT WORD (1.5 12-BIT WORDS)
-        JMS P7CHK       /CHECKSUM IT
-        JMS RDQUAD      /READ LAST PART OF CKSUM WORD
-        JMS P7CHK       /CHECKSUM IT
-        JMS VFYCHK      /VERIFY CHECKSUM
+        JMP RDLP        /NO SUCH LUCK
+        TAD XFUNCT      /IF OP WAS FOR WDSBLK-1, READ AND
+        CLL RTR         /CHECKSUM THE LAST TAPE WORD
+        SNL CLA
+        JMP RDLP2
+        JMS RDQUAD      /NOT NEEDED FOR WDSBLK/BLOCK
+        JMS EQUFUN      /CHECKSUM IT
+RDLP2,  JMS RDQUAD      /READ CHECKSUM
+        AND K7700
+        JMS EQUFUN
+        JMS GETCHK      /GET SIX BIT CHECKSUM
         JMP I CRWCOM
 C300,   300             /PROTECTION (NOT ANYMORE DJG)
 
@@ -398,130 +406,57 @@ RDQUAD, 0               /READ A 12 BIT WORD
         SDRD            /READ DATA
         JMP I RDQUAD
 
-XUNIT, 0
-        / VERIFIES 18-BIT 1'S COMPLEMENT CKSUM.
-        / SHOULD BE 0 OR -0.
-        / AC SHOULD BE 0 ON EXIT IF CKSUM IS OK, NONZERO
-        / OTHERWISE.
-        / CODE EXPECTS LINK TO BE SET ON EXIT REGARDLESS.
-        / THIS ROUTINE ALSO RESETS VARIOUS CHECKSUM ROUTINE
-        / STATE BACK TO INITIAL CONDITIONS IN PREPARATION
-        / FOR THE NEXT BLOCK.
-VFYCHK, 0
-        CLA	CLL
-        TAD CK18L       /CHECK FOR ZERO
-        SZA CLA
-        JMP VFYNEG      /NOPE, TRY NEGATIVE ZERO
-        TAD CK18H       
-        JMP VDONE       /VALIDITY IS DEPENDENT ON THE VALUE OF CK18H
-VFYNEG,	CLA IAC         /CHECK FOR NEGATIVE ZERO (777777)
-        TAD CK18L       /LOW 12 BITS SHOULD BE ZERO AFTER INCREMENT
-        SZA
-        JMP VDONE       /INVALID CKSUM
-        TAD CK18H
-        TAD (0100       /HIGH 6 BITS SHOULD BE ZERO AFTER INCREMENT
-VDONE,	DCA EQUTMP      /SAVE RESULT
-        DCA CK18L       /CLEAR 18-BIT CKSUM FOR NEXT GO-ROUND
-        DCA CK18H
-        TAD P7TBLL
-        DCA P7WD        /RESET CHECKSUM WORD ROUTINE POINTER
-        CLL CML         /FORCES LINK ON AT RWCOM
-        TAD EQUTMP      /RELOAD RESULT
-        JMP I VFYCHK
+XUNIT,
+EQUFUN, 0               /COMPUTE EQUIVALENCE CHECKSUM
+        CMA
+        DCA EQUTMP      /ACTUALLY CHECKSUMS ON DECTAPE ARE
+        TAD EQUTMP      /EQUIVALENCE OF ALL WORDS IN A RECORD
+        AND CHKSUM      /SIX BITS AT A TIME. BUT SINCE EQUIVALENCE
+        CIA             /IS ASSOCIATIVE, WE CAN DO IT 12
+        CLL RAL         /BITS AT A TIME AND CONDENSE LATER.
+        TAD EQUTMP      /THIS ROUTINE USES THESE IDENTITIES:
+        TAD CHKSUM      /A+B=(A.XOR.B)+2*(A.AND.B)
+        DCA CHKSUM      /A.EQU.B=.NOT.(A.XOR.B)=A.XOR.(.NOT.B)
+        TAD EQUTMP      /A.EQU.B=(A+(.NOT.B))-2*(A.AND.(.NOT.B))
+        CMA
+        JMP I EQUFUN
+
+GETCHK, 0               /FORM 6 BIT CHECKSUM
+        CLA
+        TAD CHKSUM
+        CMA
+        CLL RTL
+        RTL
+        RTL
+        JMS EQUFUN
+        CLA CLL CML     /FORCES LINK ON AT RWCOM
+        TAD CHKSUM
+        AND K7700
+        JMP I GETCHK
 
 CFATAL, FATAL
 CRWCOM, RWCOM
 XFUNCT, 0
 CM32,   -32
 C1400,  1400
+CHKSUM, 0
 WORDS,  0
 XWCT,   0
-P7TBLL, P7TBL
-                        
-        PAGE
-                        /PDP-7 550 CHECKSUM ROUTINE:
-                        /COMPUTE 18-BIT 1'S COMPLEMENT CHECKSUM
-                        /AC CONTAINS LAST 12-BIT WORD READ FROM TAPE, STOW THESE BITS
-                        /IN THE RIGHT PLACE IN THE 18-BIT WORD AND ADD TO RUNNING SUM
-                        /AC MUST BE RESTORED BEFORE RETURNING
-                        /THIS CURRENTLY EXECUTES IN ABOUT 65US WORST-CASE.
-P7CHK,  0
-        DCA EQUTMP      /SAVE ORIGINAL AC
-        
-        TAD EQUTMP
-        JMP I P7WD      /DISPATCH TO WORD ROUTINE, AUTOINCREMENT P7WD
-        
-P7WD0,                  /TAPE WORD 0: 18-BIT WORD 0, HIGH 12 BITS.
-        AND (7700       /STORE HIGH 6 BITS IN 18 BIT HIGH
-        DCA WD18H
-        TAD EQUTMP
-        BSW
-        AND (7700       /STORE LOW 6 BITS IN UPPER 6 BITS OF 18 BIT LOW WORD
-        DCA WD18L
-        JMP P7DONE      /DONE, NO 18-BIT WORD READY YET
-        
-P7WD1,                  /TAPE WORD 1: 18-BIT WORD 0, LOW 6-BITS; 18-BIT WORD 1, HIGH 6-BITS
-        AND (7700       /TAKE HIGH 6 BITS
-        BSW
-        TAD WD18L       /FINISH 18-BIT WORD 0 (LOW 6-BITS)
-        DCA WD18L
-        TAD EQUTMP      /SAVE BITS FOR NEXT WORD (HIGH 6 BITS OF 18-BIT WORD 1)		
-        DCA WD18T
-        JMP P7CK        /DO CHECKSUM, 18-BIT WORD 0 DONE.
-        
-P7WD2,                  /TAPE WORD 2: 18-BIT WORD 1, LOW 12-BITS
-        DCA WD18L       /THAT WAS EASY.
-        TAD WD18T       /COPY HIGH 6 BITS FROM LAST TAPE WORD
-        AND (0077
-        BSW
-        DCA WD18H
-        TAD P7TBL
-        DCA P7WD        / RESET WORD ROUTINE POINTER AND CONTINUE, 18-BIT WORD 1 DONE.
-        
-                        /DO AN 18-BIT 1'S COMPLEMENT ADDITION TO THE RUNNING CHECKSUM
-P7CK,   CLL CLA         /CLEAR LINK, NEEDED FOR CARRY DETECTION
-        TAD WD18L       /ADD TO LOW 12 BITS
-        TAD	CK18L
-        DCA CK18L
-        SNL             /CARRY FROM LOW 12 BITS?
-        JMP P7HI        /NO, CONTINUE
-        CLL	CLA         /YES, INCREMENT HIGH 6 BITS
-        TAD (0100
-P7HI,   TAD CK18H       /ADD CKSUM TO HIGH 6 BITS	
-        TAD WD18H       /(NOTE THAT THE ABOVE TWO ADDS CAN RESULT IN AT MOST ONE CARRY OUT)
-        DCA CK18H
-        SNL             /CARRY?
-        JMP P7DONE      /NO, DONE HERE.
-        ISZ CK18L       /END-AROUND CARRY TO LOW WORD
-        JMP P7DONE      /RESULT NON-ZERO, DONE
-        TAD CK18H       /RESULT ZERO: CARRY FROM LOW 12-BIT WORD TO HIGH SIX BITS
-        TAD (0100       /THIS CAN'T OVERFLOW SINCE WE JUST DID A CARRY OUT FROM IT
-        DCA CK18H
-P7DONE, TAD EQUTMP      /RESTORE AC
-        JMP I P7CHK     /DONE
-
-P7TBL,  P7TBL           / JUMP TABLE FOR 18-BIT CHECKSUM ROUTINE
-        JMP P7WD0
-        JMP P7WD1
-        JMP P7WD2
-
-        *10
-P7WD,   P7TBL
-        
+EQUTMP, 0
 
         *20
 RETRY,  7774            / RETRY UP TO 4 TIME
 NUMBLK, 3777            / MAX NUMBER OF BLOCKS TO ATTEMPT READING.  BY DEFAULT THIS PROGRAM WILL READ UNTIL
                         / IT HITS THE END OF THE TAPE (FORWARD ENDZONE).  IF YOU NEED TO LIMIT THE NUMBER OF BLOCKS
                         / READ, MODIFY THIS VALUE.
-
 MWORDS, -WDSBLK         / WORDS PER BLOCK
 WCOUNT, 0
-BLKFLD, 12              / 10 386 WORD BLOCKS OF 12-BIT WORDS, EQUIVALENT TO 256 18-BIT WORDS.
+BLKFLD, 36              / 30 129 WORD BLOCKS OF 12-BIT WORDS
                         / WRAPPING PAST END OF LAST FIELD DOESN'T WORK
 FIELDS, 0
 RDSIZE, 0               / NUMBER BLOCKS PER READ
 CBLOCK, 0               / CURRENT BLOCK TO XFER
+CLKSUM, 0
 DRVSEL, 0
 READST, 377
 LOC,    0
@@ -542,17 +477,7 @@ PGCT,   0
 CXWCT,  XWCT
 M20,    -20
 
-
-WD18L,  0               / Low 12 bits of current 18-bit word
-WD18H,  0               / High 6 bits of current 18-bit word - 
-                        / upper 6 bits are used to make carry-out testing faster, low bits must be zero.
-                        / (routine actually testing cksum at end of block will need to take this into account.)
-WD18T,  0               / Temporary storage while building 18-bit words
-CK18L,  0               / Low 12 bits of running 18-bit PDP-7 checksum
-CK18H,  0               / High 6 bits -- see WD18H for special info.
-EQUTMP, 0
-
-    *140
+        *140
 FINISH, HLT             / Normal good halt
         JMP START
 
@@ -578,10 +503,6 @@ RDSZLP, TAD BLKFLD      / Multiply by number of fields available
         DCA RDSIZE      / NUMBER BLOCK PER READ
         DCA CBLOCK
         DCA CHKSM
-        DCA CK18L       /RESET 18B CHECKSUM DATA
-        DCA CK18H
-        TAD P7TBL
-        DCA P7WD
 
 DUMPLP, CLA
         TAD RDSIZE
@@ -660,7 +581,7 @@ ERRRET,
         CIA
         TAD BLOCK       /Get - number good blocks read
         CIA             /Last was bad
-        SNA
+        SNA     
         JMP FSTBAD      /First block is bad, no good to send
         DCA BCNT
         TAD (377
@@ -750,7 +671,7 @@ STFLD4, NOP
         ISZ LEN
         JMP OUT
         JMP I OUTBLK
-ENDBK,  TAD TEMP    /SEND LAST PART OF WORD
+ENDBK,  TAD TEMP        /SEND LAST PART OF WORD
         JMS PUN
         JMP I OUTBLK
 
