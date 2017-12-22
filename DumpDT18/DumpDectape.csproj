@@ -47,7 +47,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
-    <None Include="dumpdt12.bin" />
+    <None Include="dumpdt12.bin">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="dumpdt12.pal" />
     <None Include="dumpdt18-550.bin">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

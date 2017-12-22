@@ -44,7 +44,10 @@ namespace DumpDectape
                               diagOutput = new FileStream(diagFileName, FileMode.Create, FileAccess.Write))
             {
                 IBlockProcessor blockProcessor = null;
-                int tapeBits = 0;                
+                int tapeBits = 0;
+
+                StreamWriter diagText = new StreamWriter(diagOutput);
+                diagText.AutoFlush = true;
 
                 switch (_configuration.TapeType)
                 {
@@ -54,7 +57,7 @@ namespace DumpDectape
                         break;
 
                     case TapeType.Sixteen:
-                        blockProcessor = new BlockProcessor16(tapeOutput);
+                        blockProcessor = new BlockProcessor16(tapeOutput, diagText);
                         tapeBits = 16;
                         break;
 
@@ -66,9 +69,7 @@ namespace DumpDectape
                     default:
                         throw new InvalidOperationException("Unexpected tape type.");
                 }
-                 
-                StreamWriter diagText = new StreamWriter(diagOutput);
-                diagText.AutoFlush = true;
+                                 
                 diagText.WriteLine("Summary log for {0}-bit DECTape image {1} captured on {2}:", tapeBits, tapeFileName, DateTime.Now);
                 
                 Console.WriteLine("Initialized, waiting for tape data.");
@@ -541,13 +542,14 @@ namespace DumpDectape
 
     public class BlockProcessor16 : IBlockProcessor
     {
-        public BlockProcessor16(Stream outputStream)
+        public BlockProcessor16(Stream outputStream, StreamWriter logStream)
         {
             _outStream = outputStream;
             _byteIndex36 = 0;
             _thirtySix = 0;
             _wordCount16 = 0;
             _blockDone = true;
+            _warnEighteen = false;
         }
 
         public bool BlockDone
@@ -649,15 +651,27 @@ namespace DumpDectape
             }
         }
 
-        private static void WriteThirtySix(Stream outStream, ulong thirtySix)
+        private void WriteThirtySix(Stream outStream, ulong thirtySix)
         {
-            WriteSixteen(outStream, (uint)(thirtySix & 0xffff));
+            //
+            // Verify that the top 2 bits of the two 18-bit words here are zero.
+            // If not, we might be mistakenly reading an 18-bit tape as a 16-bit one.
+            // That would be bad.  Log a single message indicating a potential issue.
+            //
+            if (!_warnEighteen &&
+                ((thirtySix & 0x30000) != 0 ||
+                (thirtySix & 0xc00000000) != 0))
+            {
+                Console.WriteLine("Warning: 18-bit data detected on tape -- this may be an 18-bit tape.");
+                _logStream.WriteLine("Warning: 18-bit data detected on tape -- this may be an 18-bit tape.");
+                _warnEighteen = true;
+            }
 
-            // TODO: verify this is correct.
+            WriteSixteen(outStream, (uint)(thirtySix & 0xffff));
             WriteSixteen(outStream, (uint)((thirtySix & 0x3fffc0000) >> 18));
         }
 
-        private static void WriteSixteen(Stream outStream, uint sixteen)
+        private void WriteSixteen(Stream outStream, uint sixteen)
         {
             outStream.WriteByte((byte) (sixteen & 0x00ff));
             outStream.WriteByte((byte)((sixteen & 0xff00) >> 8));
@@ -675,7 +689,7 @@ namespace DumpDectape
         private ulong _thirtySix;
 
         /// <summary>
-        /// The number of 18-bit words we've read.
+        /// The number of 16-bit words we've read.
         /// </summary>
         private int _wordCount16;
 
@@ -685,9 +699,19 @@ namespace DumpDectape
         private bool _blockDone;
 
         /// <summary>
+        /// Whether we've given the "hey, this might be an 18-bit tape" warning before.
+        /// </summary>
+        private bool _warnEighteen;
+
+        /// <summary>
         /// The stream we'll flush the data to.
         /// </summary>
         private Stream _outStream;
+
+        /// <summary>
+        /// The log stream, in case we need to log a warning.
+        /// </summary>
+        private StreamWriter _logStream;
     }
 
     public class BlockProcessor12 : IBlockProcessor
@@ -778,17 +802,17 @@ namespace DumpDectape
         }
 
         /// <summary>
-        /// The current byte index into the two 36-bit words we're building
+        /// The current byte index into the two 12-bit words we're building
         /// </summary>
         private int _byteIndex12;
 
         /// <summary>
-        /// The current 36-bit word we've built
+        /// The current 12-bit word we've built
         /// </summary>
         private ulong _twelve;
 
         /// <summary>
-        /// The number of 18-bit words we've read.
+        /// The number of 12-bit words we've read.
         /// </summary>
         private int _wordCount12;
 
